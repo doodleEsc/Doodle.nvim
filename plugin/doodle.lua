@@ -13,8 +13,17 @@ if vim.fn.has("nvim-0.8") == 0 then
     return
 end
 
+-- 自动初始化函数
+local function ensure_initialized()
+    if not vim.g.doodle_initialized then
+        require("doodle").setup({})
+        vim.g.doodle_initialized = true
+    end
+end
+
 -- 主要命令：打开/关闭Doodle侧边栏
 vim.api.nvim_create_user_command("Doodle", function()
+    ensure_initialized()
     require("doodle.ui").toggle()
 end, {
     desc = "打开/关闭 Doodle.nvim 侧边栏"
@@ -22,6 +31,7 @@ end, {
 
 -- 打开Doodle
 vim.api.nvim_create_user_command("DoodleOpen", function()
+    ensure_initialized()
     require("doodle.ui").open()
 end, {
     desc = "打开 Doodle.nvim 侧边栏"
@@ -29,6 +39,7 @@ end, {
 
 -- 关闭Doodle
 vim.api.nvim_create_user_command("DoodleClose", function()
+    ensure_initialized()
     require("doodle.ui").close()
 end, {
     desc = "关闭 Doodle.nvim 侧边栏"
@@ -36,6 +47,7 @@ end, {
 
 -- 停止当前Agent
 vim.api.nvim_create_user_command("DoodleStop", function()
+    ensure_initialized()
     local agent = require("doodle.agent")
     if agent.stop() then
         vim.notify("Agent已停止", vim.log.levels.INFO)
@@ -48,6 +60,7 @@ end, {
 
 -- 暂停当前Agent
 vim.api.nvim_create_user_command("DoodlePause", function()
+    ensure_initialized()
     local agent = require("doodle.agent")
     if agent.pause() then
         vim.notify("Agent已暂停", vim.log.levels.INFO)
@@ -60,6 +73,7 @@ end, {
 
 -- 恢复当前Agent
 vim.api.nvim_create_user_command("DoodleResume", function()
+    ensure_initialized()
     local agent = require("doodle.agent")
     if agent.resume() then
         vim.notify("Agent已恢复", vim.log.levels.INFO)
@@ -72,6 +86,7 @@ end, {
 
 -- 显示Agent状态
 vim.api.nvim_create_user_command("DoodleStatus", function()
+    ensure_initialized()
     local agent = require("doodle.agent")
     local status = agent.get_status()
     
@@ -94,6 +109,7 @@ end, {
 
 -- 显示任务进度
 vim.api.nvim_create_user_command("DoodleProgress", function()
+    ensure_initialized()
     local agent = require("doodle.agent")
     local progress = agent.get_progress()
     local details = agent.get_task_details()
@@ -118,6 +134,7 @@ end, {
 
 -- 列出所有可用的工具
 vim.api.nvim_create_user_command("DoodleTools", function()
+    ensure_initialized()
     local tool = require("doodle.tool")
     local tools = tool.list_tools()
     
@@ -133,6 +150,7 @@ end, {
 
 -- 列出所有可用的Provider
 vim.api.nvim_create_user_command("DoodleProviders", function()
+    ensure_initialized()
     local provider = require("doodle.provider")
     local providers = provider.list_providers()
     
@@ -150,6 +168,7 @@ end, {
 
 -- 切换Provider
 vim.api.nvim_create_user_command("DoodleSetProvider", function(opts)
+    ensure_initialized()
     local provider_name = opts.args
     if not provider_name or provider_name == "" then
         vim.notify("请指定Provider名称", vim.log.levels.ERROR)
@@ -195,6 +214,7 @@ end, {
 
 -- 清理资源
 vim.api.nvim_create_user_command("DoodleCleanup", function()
+    ensure_initialized()
     local agent = require("doodle.agent")
     local task = require("doodle.task")
     

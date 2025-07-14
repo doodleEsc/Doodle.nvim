@@ -163,38 +163,45 @@ function M.render_status()
         return
     end
     
-    local status_text = ""
-    local status_highlight = ""
-    
-    if M.ui.current_state == M.GENERATE_STATUS.GENERATING then
-        status_text = "🔄 正在生成回复..."
-        status_highlight = M.highlights.STATUS_GENERATING
-    elseif M.ui.current_state == M.GENERATE_STATUS.TOOL_CALLING then
-        status_text = "🔧 工具调用中..."
-        status_highlight = M.highlights.STATUS_GENERATING
-    elseif M.ui.current_state == M.GENERATE_STATUS.SUCCEEDED then
-        status_text = "✅ 生成完成"
-        status_highlight = M.highlights.STATUS_SUCCESS
-    elseif M.ui.current_state == M.GENERATE_STATUS.FAILED then
-        status_text = "❌ 生成失败"
-        status_highlight = M.highlights.STATUS_ERROR
-    else
-        status_text = "💭 等待输入..."
-        status_highlight = M.highlights.SUBTITLE
-    end
-    
-    M.with_writable_buffer(M.ui.status_buffer, function()
-        vim.api.nvim_buf_set_lines(M.ui.status_buffer, 0, -1, false, {
-            status_text,
-            "",
-            "按 Ctrl+H 查看帮助"
-        })
+    -- 使用vim.schedule确保在安全的上下文中执行vim API
+    vim.schedule(function()
+        if not M.ui.status_buffer or not vim.api.nvim_buf_is_valid(M.ui.status_buffer) then
+            return
+        end
+        
+        local status_text = ""
+        local status_highlight = ""
+        
+        if M.ui.current_state == M.GENERATE_STATUS.GENERATING then
+            status_text = "🔄 正在生成回复..."
+            status_highlight = M.highlights.STATUS_GENERATING
+        elseif M.ui.current_state == M.GENERATE_STATUS.TOOL_CALLING then
+            status_text = "🔧 工具调用中..."
+            status_highlight = M.highlights.STATUS_GENERATING
+        elseif M.ui.current_state == M.GENERATE_STATUS.SUCCEEDED then
+            status_text = "✅ 生成完成"
+            status_highlight = M.highlights.STATUS_SUCCESS
+        elseif M.ui.current_state == M.GENERATE_STATUS.FAILED then
+            status_text = "❌ 生成失败"
+            status_highlight = M.highlights.STATUS_ERROR
+        else
+            status_text = "💭 等待输入..."
+            status_highlight = M.highlights.SUBTITLE
+        end
+        
+        M.with_writable_buffer(M.ui.status_buffer, function()
+            vim.api.nvim_buf_set_lines(M.ui.status_buffer, 0, -1, false, {
+                status_text,
+                "",
+                "按 Ctrl+H 查看帮助"
+            })
+        end)
+        
+        -- 设置高亮
+        if status_highlight then
+            vim.api.nvim_buf_add_highlight(M.ui.status_buffer, -1, status_highlight, 0, 0, -1)
+        end
     end)
-    
-    -- 设置高亮
-    if status_highlight then
-        vim.api.nvim_buf_add_highlight(M.ui.status_buffer, -1, status_highlight, 0, 0, -1)
-    end
 end
 
 -- 设置状态
@@ -558,43 +565,50 @@ function M.output(text, opts)
         return
     end
     
-    opts = opts or {}
-    local highlight = opts.highlight
-    local prefix = opts.prefix and "  " or ""
-    
-    -- 处理多行文本
-    local lines = {}
-    for line in text:gmatch("[^\r\n]*") do
-        table.insert(lines, prefix .. line)
-    end
-    
-    if #lines == 0 then
-        lines = { prefix .. text }
-    end
-    
-    -- 添加到输出缓冲区
-    local current_lines = vim.api.nvim_buf_get_lines(M.ui.output_buffer, 0, -1, false)
-    local start_line = #current_lines
-    
-    for _, line in ipairs(lines) do
-        table.insert(current_lines, line)
-    end
-    
-    M.with_writable_buffer(M.ui.output_buffer, function()
-        vim.api.nvim_buf_set_lines(M.ui.output_buffer, 0, -1, false, current_lines)
-    end)
-    
-    -- 应用高亮
-    if highlight then
-        for i, _ in ipairs(lines) do
-            vim.api.nvim_buf_add_highlight(M.ui.output_buffer, -1, highlight, start_line + i, 0, -1)
+    -- 使用vim.schedule确保在安全的上下文中执行vim API
+    vim.schedule(function()
+        if M.ui.status ~= M.UI_STATUS.OPEN or not M.ui.output_buffer then
+            return
         end
-    end
-    
-    -- 滚动到底部
-    if M.ui.scroll_enabled then
-        M.scroll_to_bottom()
-    end
+        
+        opts = opts or {}
+        local highlight = opts.highlight
+        local prefix = opts.prefix and "  " or ""
+        
+        -- 处理多行文本
+        local lines = {}
+        for line in text:gmatch("[^\r\n]*") do
+            table.insert(lines, prefix .. line)
+        end
+        
+        if #lines == 0 then
+            lines = { prefix .. text }
+        end
+        
+        -- 添加到输出缓冲区
+        local current_lines = vim.api.nvim_buf_get_lines(M.ui.output_buffer, 0, -1, false)
+        local start_line = #current_lines
+        
+        for _, line in ipairs(lines) do
+            table.insert(current_lines, line)
+        end
+        
+        M.with_writable_buffer(M.ui.output_buffer, function()
+            vim.api.nvim_buf_set_lines(M.ui.output_buffer, 0, -1, false, current_lines)
+        end)
+        
+        -- 应用高亮
+        if highlight then
+            for i, _ in ipairs(lines) do
+                vim.api.nvim_buf_add_highlight(M.ui.output_buffer, -1, highlight, start_line + i, 0, -1)
+            end
+        end
+        
+        -- 滚动到底部
+        if M.ui.scroll_enabled then
+            M.scroll_to_bottom()
+        end
+    end)
 end
 
 -- 追加文本到最后一行
@@ -603,31 +617,38 @@ function M.append(text, opts)
         return
     end
     
-    opts = opts or {}
-    local highlight = opts.highlight
-    
-    local current_lines = vim.api.nvim_buf_get_lines(M.ui.output_buffer, 0, -1, false)
-    if #current_lines == 0 then
-        current_lines = {""}
-    end
-    
-    local last_line_idx = #current_lines - 1
-    local old_content = current_lines[#current_lines]
-    current_lines[#current_lines] = old_content .. text
-    
-    M.with_writable_buffer(M.ui.output_buffer, function()
-        vim.api.nvim_buf_set_lines(M.ui.output_buffer, 0, -1, false, current_lines)
+    -- 使用vim.schedule确保在安全的上下文中执行vim API
+    vim.schedule(function()
+        if M.ui.status ~= M.UI_STATUS.OPEN or not M.ui.output_buffer then
+            return
+        end
+        
+        opts = opts or {}
+        local highlight = opts.highlight
+        
+        local current_lines = vim.api.nvim_buf_get_lines(M.ui.output_buffer, 0, -1, false)
+        if #current_lines == 0 then
+            current_lines = {""}
+        end
+        
+        local last_line_idx = #current_lines - 1
+        local old_content = current_lines[#current_lines]
+        current_lines[#current_lines] = old_content .. text
+        
+        M.with_writable_buffer(M.ui.output_buffer, function()
+            vim.api.nvim_buf_set_lines(M.ui.output_buffer, 0, -1, false, current_lines)
+        end)
+        
+        -- 应用高亮
+        if highlight then
+            vim.api.nvim_buf_add_highlight(M.ui.output_buffer, -1, highlight, last_line_idx, #old_content, -1)
+        end
+        
+        -- 滚动到底部
+        if M.ui.scroll_enabled then
+            M.scroll_to_bottom()
+        end
     end)
-    
-    -- 应用高亮
-    if highlight then
-        vim.api.nvim_buf_add_highlight(M.ui.output_buffer, -1, highlight, last_line_idx, #old_content, -1)
-    end
-    
-    -- 滚动到底部
-    if M.ui.scroll_enabled then
-        M.scroll_to_bottom()
-    end
 end
 
 -- 滚动到底部
@@ -881,30 +902,42 @@ end
 
 -- Agent回调函数：处理开始生成
 function M.on_generate_start()
-    M.set_status(M.GENERATE_STATUS.GENERATING)
-    M.output_generating("开始生成回复...")
+    -- 使用vim.schedule确保在安全的上下文中执行
+    vim.schedule(function()
+        M.set_status(M.GENERATE_STATUS.GENERATING)
+        M.output_generating("开始生成回复...")
+    end)
 end
 
 -- Agent回调函数：处理生成完成
 function M.on_generate_complete()
-    M.set_status(M.GENERATE_STATUS.SUCCEEDED)
-    vim.defer_fn(function()
-        M.set_status(M.GENERATE_STATUS.IDLE)
-    end, 2000)
+    -- 使用vim.schedule确保在安全的上下文中执行
+    vim.schedule(function()
+        M.set_status(M.GENERATE_STATUS.SUCCEEDED)
+        vim.defer_fn(function()
+            M.set_status(M.GENERATE_STATUS.IDLE)
+        end, 2000)
+    end)
 end
 
 -- Agent回调函数：处理生成失败
 function M.on_generate_error(error_msg)
-    M.output_error(error_msg or "生成过程中发生未知错误")
-    vim.defer_fn(function()
-        M.set_status(M.GENERATE_STATUS.IDLE)
-    end, 3000)
+    -- 使用vim.schedule确保在安全的上下文中执行
+    vim.schedule(function()
+        M.output_error(error_msg or "生成过程中发生未知错误")
+        vim.defer_fn(function()
+            M.set_status(M.GENERATE_STATUS.IDLE)
+        end, 3000)
+    end)
 end
 
 -- Agent回调函数：处理工具调用
 function M.on_tool_calling(tool_name)
-    M.set_status(M.GENERATE_STATUS.TOOL_CALLING)
-    M.output("🔧 正在调用工具: " .. (tool_name or "未知工具"), { highlight = M.highlights.STATUS_GENERATING })
+    -- 使用vim.schedule确保在安全的上下文中执行
+    vim.schedule(function()
+        M.set_status(M.GENERATE_STATUS.TOOL_CALLING)
+        M.output("🔧 正在调用工具: " .. (tool_name or "未知工具"), { highlight = M.highlights.STATUS_GENERATING })
+    end)
 end
 
 -- 导出模块

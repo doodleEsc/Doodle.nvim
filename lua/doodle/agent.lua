@@ -54,14 +54,13 @@ function Agent:start(query)
     self.status = M.AGENT_STATUS.THINKING
     self.stop_requested = false
     
-    utils.log("dev", "Agent 状态设置为 THINKING, 准备启动主循环")
-    -- 创建新任务和上下文
-    self.current_task_id = task.create_task(query)
+    utils.log("dev", "Agent 状态设置为 THINKING, 准备思考任务")
+    -- 创建新上下文
     self.current_context_id = context.create_context()
     context.add_message(self.current_context_id, "user", query)
     
-    -- 启动主循环
-    self:run_loop()
+    -- 启动思考任务阶段
+    self:think_task(query)
     
     return true
 end
@@ -103,6 +102,11 @@ function Agent:think_task(query)
             elseif response_buffer ~= "" then
                 context.add_assistant_message(self.current_context_id, response_buffer)
                 self:output("💡 " .. response_buffer)
+                -- 直接文本回复完成，停止Agent
+                self:stop()
+            else
+                -- 没有内容，也要停止Agent
+                self:stop()
             end
             return
         end
@@ -245,6 +249,8 @@ function Agent:process_todo(todo)
     local function_call_buffer = {}
     
     provider.request(messages, options, function(content, meta)
+
+		print("agent:process_todo.request.callback" .. content)
         if meta and meta.error then
             self:output("❌ 错误: " .. (meta.error or "未知错误"))
             task.update_todo_status(self.current_task_id, todo.id, task.TODO_STATUS.FAILED, "API请求失败")
@@ -287,12 +293,15 @@ end
 -- 停止Agent
 function Agent:stop()
     if self.status == M.AGENT_STATUS.STOPPED then
+        utils.log("dev", "Agent.stop 调用但状态已经是STOPPED，跳过")
         return
     end
-    utils.log("dev", "Agent.stop 调用, 状态: " .. self.status)
+    utils.log("dev", "Agent.stop 调用, 原状态: " .. self.status)
     self.stop_requested = true
     self.status = M.AGENT_STATUS.STOPPED
+    utils.log("dev", "Agent状态已设置为: " .. self.status)
     self:trigger_callback("on_stop")
+    utils.log("dev", "Agent.stop 完成，已触发on_stop回调")
 end
 
 -- 暂停Agent
@@ -325,106 +334,11 @@ function Agent:trigger_callback(event, ...)
     end
 end
 
--- 主处理循环
-function Agent:run_loop()
-    if self.loop_running then
-        return
-    end
-    self.loop_running = true
-    utils.log("dev", "主处理循环开始 (run_loop)")
 
-    vim.defer_fn(function()
-        local current_task = task.get_task(self.current_task_id)
-        if not current_task then
-            utils.log("error", "无法获取当前任务，ID: " .. self.current_task_id)
-            self.status = M.AGENT_STATUS.STOPPED
-            self:trigger_callback("on_error", "任务丢失")
-            self.loop_running = false
-            return
-        end
-
-        local loop_continue = true
-        while loop_continue and not self.stop_requested do
-            if self.status == M.AGENT_STATUS.PAUSED then
-                -- 在暂停状态下等待
-                -- 这里的实现可以更复杂，例如使用 vim.loop
-            else
-                utils.log("dev", "开始处理步骤, 任务 ID: " .. current_task.id .. ", 状态: " .. current_task.status)
-                local current_step = task.get_current_step(self.current_task_id)
-
-                -- 准备上下文和提示
-                local history = context.get_history(self.current_context_id)
-                local system_prompt = prompt.get_system_prompt()
-                local prepared_prompt = prompt.prepare_prompt(current_step.prompt, history)
-                
-                utils.log("dev", "准备调用 LLM, 模型: " .. (provider.get_config().model or "默认"))
-                -- 调用LLM
-                local llm_result, err = provider.generate({
-                    prompt = prepared_prompt,
-                    system = system_prompt,
-                    stream = true,
-                    on_chunk = function(chunk)
-                        if chunk and chunk.content then
-                            task.append_to_step_result(self.current_task_id, chunk.content)
-                            self:trigger_callback("on_chunk", chunk)
-                            utils.log("dev", "收到流式数据块: " .. chunk.content)
-                        end
-                        if chunk and chunk.tool_calls then
-                            for _, tool_call in ipairs(chunk.tool_calls) do
-                                utils.log("dev", "收到工具调用请求: " .. tool_call.name, tool_call.input)
-                                local tool_result, tool_err = tool.call(tool_call.name, tool_call.input)
-                                if tool_err then
-                                    utils.log("error", "工具调用失败: " .. tool_err)
-                                    task.add_tool_result(self.current_task_id, tool_call.id, { error = tool_err })
-                                else
-                                    utils.log("dev", "工具调用成功, 结果: " .. tool_result)
-                                    task.add_tool_result(self.current_task_id, tool_call.id, { result = tool_result })
-                                end
-                                self:trigger_callback("on_progress", { type = "tool_result", name = tool_call.name, result = tool_result, error = tool_err })
-                            end
-                        end
-                    end
-                })
-
-                if err then
-                    utils.log("error", "LLM 调用失败: " .. err)
-                    task.update_step_status(self.current_task_id, "failed")
-                    self.status = M.AGENT_STATUS.STOPPED
-                    self:trigger_callback("on_error", err)
-                    loop_continue = false
-                else
-                    utils.log("dev", "LLM 调用完成, 最终结果: ", llm_result)
-                    task.update_step_status(self.current_task_id, "completed")
-                    context.add_message(self.current_context_id, "assistant", llm_result.content or "")
-                    
-                    if not llm_result.tool_calls or #llm_result.tool_calls == 0 then
-                        -- 没有更多的工具调用，任务完成
-                        utils.log("dev", "任务完成，没有更多工具调用")
-                        task.update_task_status(self.current_task_id, "completed")
-                        self.status = M.AGENT_STATUS.IDLE
-                        self:trigger_callback("on_complete", llm_result)
-                        loop_continue = false
-                    else
-                        -- 准备下一个步骤以处理工具结果
-                        utils.log("dev", "任务继续，准备下一个步骤以处理工具结果")
-                        task.add_step(self.current_task_id, "处理工具结果")
-                    end
-                end
-            end
-        end
-        
-        utils.log("dev", "主处理循环结束, 停止请求: " .. tostring(self.stop_requested))
-        self.loop_running = false
-        if self.stop_requested then
-            self.status = M.AGENT_STATUS.STOPPED
-        end
-    end, 0)
-    
-    return true
-end
 
 -- 输出消息
 function Agent:output(message, options)
+	print("agent:output" .. message)
     options = options or {}
     
     if self.callbacks.on_output then
@@ -488,8 +402,20 @@ end
 
 -- 启动新的Agent
 function M.start(query, callbacks)
+
     local is_active = M.current_agent and 
                       (M.current_agent.status == M.AGENT_STATUS.THINKING or M.current_agent.status == M.AGENT_STATUS.WORKING)
+
+    -- 添加调试日志
+    if M.current_agent then
+        utils.log("dev", "检查Agent状态: " .. M.current_agent.status)
+        utils.log("dev", "THINKING状态: " .. M.AGENT_STATUS.THINKING)
+        utils.log("dev", "WORKING状态: " .. M.AGENT_STATUS.WORKING)
+        utils.log("dev", "STOPPED状态: " .. M.AGENT_STATUS.STOPPED)
+        utils.log("dev", "is_active结果: " .. tostring(is_active))
+    else
+        utils.log("dev", "当前没有Agent实例")
+    end
 
     if is_active then
         utils.log("warn", "已有Agent在运行中，请等待其完成后再启动新任务。")
@@ -530,6 +456,16 @@ function M.send_message(message, callbacks)
             end
         end,
         
+        on_output = function(message, options)
+            if options and options.append then
+                ui.append(message, { highlight = ui.highlights.ASSISTANT_MESSAGE })
+                utils.log("dev", "Agent on_output 回调触发 (streaming), 内容: " .. message)
+            else
+                ui.output(message, { highlight = ui.highlights.ASSISTANT_MESSAGE })
+                utils.log("dev", "Agent on_output 回调触发 (完整消息), 内容: " .. message)
+            end
+        end,
+        
         on_complete = function(result)
             ui.on_generate_complete()
             utils.log("info", "消息处理完成")
@@ -540,6 +476,12 @@ function M.send_message(message, callbacks)
             ui.on_generate_error(error_msg)
             utils.log("error", "消息处理失败: " .. (error_msg or "未知错误"))
             utils.log("dev", "Agent on_error 回调触发")
+        end,
+        
+        on_stop = function()
+            ui.on_generate_complete()
+            utils.log("info", "Agent已停止")
+            utils.log("dev", "Agent on_stop 回调触发")
         end
     }
     

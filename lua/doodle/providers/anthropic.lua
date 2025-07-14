@@ -1,24 +1,36 @@
 -- lua/doodle/providers/anthropic.lua
 local utils = require("doodle.utils")
 local base = require("doodle.providers.base")
+require("doodle.types")
 
 local M = {}
 
 -- Anthropic Provider类
+---@class DoodleAnthropicProvider : DoodleBaseProvider
 M.AnthropicProvider = {}
 M.AnthropicProvider.__index = M.AnthropicProvider
 setmetatable(M.AnthropicProvider, { __index = base.BaseProvider })
 
+---@param config DoodleProviderConfig | DoodleCustomProviderConfig
+---@return DoodleAnthropicProvider
 function M.AnthropicProvider:new(config)
     config = config or {}
-    config.name = "anthropic"
-    config.description = "Anthropic Claude API Provider"
-    config.base_url = config.base_url or "https://api.anthropic.com/v1"
-    config.model = config.model or "claude-3-sonnet-20240229"
-    config.stream = config.stream or true
-    config.supports_functions = config.supports_functions or true
     
-    local instance = base.BaseProvider:new(config)
+    -- Anthropic provider专用的API key获取逻辑
+    local api_key = config.anthropic_api_key or os.getenv("ANTHROPIC_API_KEY") or ""
+    
+    -- 创建config的副本，避免修改原始对象
+    local provider_config = {
+        name = "anthropic",
+        description = "Anthropic Claude API Provider",
+        base_url = config.base_url or "https://api.anthropic.com/v1",
+        model = config.model or "claude-3-sonnet-20240229",
+        api_key = api_key,
+        stream = config.stream or true,
+        supports_functions = config.supports_functions or true,
+    }
+    
+    local instance = base.BaseProvider:new(provider_config)
     setmetatable(instance, self)
     return instance
 end
@@ -27,35 +39,96 @@ end
 function M.AnthropicProvider:handle_stream_request(curl, url, data, headers, callback)
     local response_buffer = ""
     
-    local function process_chunk(chunk)
-        response_buffer = response_buffer .. chunk
+    local function process_chunk(error, data)
+        utils.log("dev", "[Anthropic] process_chunk调用开始")
         
-        -- 处理Anthropic的Server-Sent Events格式
-        for line in response_buffer:gmatch("[^\r\n]+") do
-            if line:match("^event: ") then
-                local event_type = line:sub(8) -- 移除"event: "前缀
-                -- 获取下一行的数据
-                local data_line = response_buffer:match("data: ([^\r\n]+)")
-                if data_line and event_type == "completion" then
-                    local success, parsed = pcall(vim.json.decode, data_line)
-                    if success and parsed.completion then
-                        callback(parsed.completion, { type = "content" })
+        -- 检查是否有错误
+        if error then
+            utils.log("error", "[Anthropic] 流式输出错误: " .. error)
+            utils.log("dev", "[Anthropic] 错误处理: 调用callback并返回")
+            callback(nil, { error = "流式输出错误: " .. error })
+            return
+        end
+        
+        -- 检查data是否为nil或空
+        if not data or data == "" then
+            utils.log("dev", "[Anthropic] 数据为空，跳过处理")
+            return
+        end
+        
+        utils.log("dev", "[Anthropic] 接收到原始数据长度: " .. #data)
+        utils.log("dev", "[Anthropic] 接收到原始数据内容: " .. vim.inspect(data))
+        
+        -- 直接分割当前接收到的数据
+        local lines = vim.split(data, "\n")
+        utils.log("dev", "[Anthropic] 数据分割为 " .. #lines .. " 行")
+        
+        -- 处理每一行
+        for i, line in ipairs(lines) do
+            utils.log("dev", "[Anthropic] 处理第 " .. i .. " 行: " .. vim.inspect(line))
+            
+            if line:match("^data: ") then
+                local json_data = line:sub(7) -- 移除"data: "前缀
+                utils.log("dev", "[Anthropic] 检测到SSE数据行，JSON内容: " .. vim.inspect(json_data))
+                
+                if json_data == "[DONE]" then
+                    utils.log("dev", "[Anthropic] 检测到[DONE]标记，结束流式输出")
+                    callback(nil, { done = true })
+                    return
+                end
+                
+                utils.log("dev", "[Anthropic] 尝试解析JSON: " .. json_data)
+                local success, parsed = pcall(vim.json.decode, json_data)
+                if success then
+                    utils.log("dev", "[Anthropic] JSON解析成功: " .. vim.inspect(parsed))
+                    
+                    -- 处理内容增量
+                    if parsed.delta and parsed.delta.text then
+                        utils.log("dev", "[Anthropic] 发现文本数据: " .. vim.inspect(parsed.delta.text))
+                        utils.log("dev", "[Anthropic] 调用callback发送内容")
+                        callback(parsed.delta.text, { type = "content" })
                     end
-                    if success and parsed.stop_reason then
+                    
+                    -- 处理工具使用
+                    if parsed.delta and parsed.delta.tool_use then
+                        local tool_use = parsed.delta.tool_use
+                        utils.log("dev", "[Anthropic] 发现工具使用数据: " .. vim.inspect(tool_use))
+                        local tool_call = {
+                            id = tool_use.id,
+                            type = "function",
+                            ["function"] = {
+                                name = tool_use.name,
+                                arguments = vim.json.encode(tool_use.input or {})
+                            }
+                        }
+                        utils.log("dev", "[Anthropic] 调用callback发送工具调用")
+                        callback(tool_call, { type = "function_call" })
+                    end
+                    
+                    -- 处理完成
+                    if parsed.stop_reason then
+                        utils.log("dev", "[Anthropic] 检测到停止原因: " .. parsed.stop_reason)
                         callback(nil, { done = true, stop_reason = parsed.stop_reason })
                     end
-                elseif event_type == "ping" then
-                    -- 处理ping事件，保持连接活跃
-                    utils.log("debug", "Anthropic ping received")
-                elseif event_type == "error" then
-                    -- 处理错误事件
-                    local success, parsed = pcall(vim.json.decode, data_line or "{}")
-                    if success and parsed.error then
+                    
+                    -- 处理错误
+                    if parsed.error then
+                        utils.log("error", "[Anthropic] API返回错误: " .. (parsed.error.message or "Unknown error"))
                         callback(nil, { error = parsed.error.message or "Unknown error" })
                     end
+                    
+                    if not (parsed.delta and (parsed.delta.text or parsed.delta.tool_use)) and not parsed.stop_reason and not parsed.error then
+                        utils.log("dev", "[Anthropic] JSON数据中没有可处理的内容")
+                    end
+                else
+                    utils.log("error", "[Anthropic] JSON解析失败: " .. vim.inspect(parsed))
                 end
+            else
+                utils.log("dev", "[Anthropic] 跳过非SSE数据行: " .. vim.inspect(line))
             end
         end
+        
+        utils.log("dev", "[Anthropic] process_chunk处理完成")
     end
     
     curl.post(url, {
@@ -82,11 +155,36 @@ function M.AnthropicProvider:handle_sync_request(curl, url, data, headers, callb
             if result.status == 200 then
                 local success, parsed = pcall(vim.json.decode, result.body)
                 if success then
+                    -- 处理内容
+                    if parsed.content then
+                        for _, content in ipairs(parsed.content) do
+                            if content.type == "text" then
+                                callback(content.text, { type = "content", done = true })
+                            elseif content.type == "tool_use" then
+                                local tool_call = {
+                                    id = content.id,
+                                    type = "function",
+                                    ["function"] = {
+                                        name = content.name,
+                                        arguments = vim.json.encode(content.input or {})
+                                    }
+                                }
+                                callback(tool_call, { type = "function_call", done = true })
+                            end
+                        end
+                    end
+                    
+                    -- 处理旧格式的completion（向后兼容）
                     if parsed.completion then
                         callback(parsed.completion, { type = "content", done = true })
                     end
+                    
                     if parsed.stop_reason then
                         callback(nil, { done = true, stop_reason = parsed.stop_reason })
+                    end
+                    
+                    if parsed.error then
+                        callback(nil, { error = parsed.error.message or "Unknown error" })
                     end
                 else
                     utils.log("error", "Anthropic响应解析失败")
@@ -118,6 +216,23 @@ function M.AnthropicProvider:convert_messages_to_anthropic(messages)
     return anthropic_messages
 end
 
+-- 转换OpenAI tools格式到Anthropic格式
+function M.AnthropicProvider:convert_tools_to_anthropic(tools)
+    local anthropic_tools = {}
+    
+    for _, tool in ipairs(tools) do
+        if tool.type == "function" and tool["function"] then
+            table.insert(anthropic_tools, {
+                name = tool["function"].name,
+                description = tool["function"].description,
+                input_schema = tool["function"].parameters
+            })
+        end
+    end
+    
+    return anthropic_tools
+end
+
 -- 实现请求方法
 function M.AnthropicProvider:request(messages, options, callback)
     local plenary_ok, curl = pcall(require, "plenary.curl")
@@ -126,7 +241,7 @@ function M.AnthropicProvider:request(messages, options, callback)
         return false
     end
     
-    local api_key = self.config.api_key or options.api_key or os.getenv("ANTHROPIC_API_KEY")
+    local api_key = self:get_api_key() or options.api_key
     if not api_key then
         utils.log("error", "未设置Anthropic API Key")
         return false
@@ -142,6 +257,40 @@ function M.AnthropicProvider:request(messages, options, callback)
         max_tokens = options.max_tokens or 2048,
         temperature = options.temperature or 0.7
     }
+    
+    -- 添加工具调用支持 (转换OpenAI tools格式到Anthropic格式)
+    if options.tools then
+        request_data.tools = self:convert_tools_to_anthropic(options.tools)
+        
+        -- 添加 tool_choice 支持
+        if options.tool_choice and options.tool_choice ~= "auto" then
+            if type(options.tool_choice) == "string" then
+                -- 如果是字符串，表示工具名称
+                request_data.tool_choice = {
+                    type = "tool",
+                    name = options.tool_choice
+                }
+            elseif type(options.tool_choice) == "table" then
+                -- 如果是表，可能是 OpenAI 格式，需要转换
+                if options.tool_choice.type == "function" and options.tool_choice["function"] then
+                    request_data.tool_choice = {
+                        type = "tool",
+                        name = options.tool_choice["function"].name
+                    }
+                elseif options.tool_choice.type == "tool" then
+                    -- 已经是 Anthropic 格式
+                    request_data.tool_choice = options.tool_choice
+                end
+            end
+        end
+    end
+    
+    -- 合并extra_body参数
+    if self.extra_body and type(self.extra_body) == "table" then
+        for key, value in pairs(self.extra_body) do
+            request_data[key] = value
+        end
+    end
     
     local headers = {
         ["x-api-key"] = api_key,

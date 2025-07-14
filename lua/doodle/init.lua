@@ -19,7 +19,7 @@ M.config = {
     
     -- UI 配置
     ui = {
-        width = 60,
+        width = 0.35,  -- 比例值：35% 的屏幕宽度
         height = 0.8,
         border = "rounded",
         title = "Doodle.nvim",
@@ -58,6 +58,7 @@ function M.setup(opts)
     -- 加载和初始化其他模块
     M.config = final_config
     require("doodle.utils").init(final_config)
+    require("doodle.ui").init(final_config)
     require("doodle.prompt").load(final_config)
     require("doodle.context").load(final_config)
     require("doodle.tool").load(final_config)

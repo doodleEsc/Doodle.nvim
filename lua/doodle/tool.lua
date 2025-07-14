@@ -1,13 +1,12 @@
 -- lua/doodle/tool.lua
 local utils = require("doodle.utils")
-local task = require("doodle.task")
-local prompt = require("doodle.prompt")
+local tools_module = require("doodle.tools")
 local M = {}
 
 -- 工具注册表
 M.tools = {}
 
--- 内置工具
+-- 内置工具引用
 M.builtin_tools = {}
 
 -- 初始化
@@ -35,192 +34,13 @@ end
 
 -- 加载内置工具
 function M.load_builtin_tools()
-    -- think_task 工具
-    M.builtin_tools.think_task = {
-        name = "think_task",
-        description = "分析用户请求并将其分解为具体的任务和todo项",
-        parameters = {
-            type = "object",
-            properties = {
-                user_query = {
-                    type = "string",
-                    description = "用户的原始请求"
-                },
-                analysis = {
-                    type = "string", 
-                    description = "对用户请求的分析和理解"
-                },
-                task_description = {
-                    type = "string",
-                    description = "任务的总体描述"
-                },
-                todos = {
-                    type = "array",
-                    items = {
-                        type = "string"
-                    },
-                    description = "具体的todo项目列表"
-                }
-            },
-            required = {"user_query", "analysis", "task_description", "todos"}
-        },
-        execute = function(args)
-            utils.log("info", "执行 think_task 工具")
-            
-            -- 验证参数
-            if not args.user_query or not args.task_description or not args.todos then
-                return {
-                    success = false,
-                    error = "缺少必要参数"
-                }
-            end
-            
-            -- 创建任务
-            local task_id = task.create_task(args.user_query, args.task_description, args.todos)
-            
-            if task_id then
-                -- 更新任务状态为进行中
-                task.update_task_status(task_id, task.TASK_STATUS.IN_PROGRESS)
-                
-                return {
-                    success = true,
-                    task_id = task_id,
-                    message = "任务创建成功，包含 " .. #args.todos .. " 个待办事项",
-                    analysis = args.analysis,
-                    task_description = args.task_description,
-                    todos = args.todos
-                }
-            else
-                return {
-                    success = false,
-                    error = "任务创建失败"
-                }
-            end
-        end
-    }
+    -- 从工具模块加载所有内置工具
+    M.builtin_tools = tools_module.load_builtin_tools()
     
-    -- update_task 工具
-    M.builtin_tools.update_task = {
-        name = "update_task",
-        description = "更新任务中todo项的状态",
-        parameters = {
-            type = "object",
-            properties = {
-                task_id = {
-                    type = "string",
-                    description = "任务ID"
-                },
-                todo_id = {
-                    type = "string",
-                    description = "Todo项ID"
-                },
-                status = {
-                    type = "string",
-                    enum = {"pending", "in_progress", "completed", "failed", "skipped"},
-                    description = "新的状态"
-                },
-                result = {
-                    type = "string",
-                    description = "执行结果或备注"
-                }
-            },
-            required = {"task_id", "todo_id", "status"}
-        },
-        execute = function(args)
-            utils.log("info", "执行 update_task 工具")
-            
-            -- 验证参数
-            if not args.task_id or not args.todo_id or not args.status then
-                return {
-                    success = false,
-                    error = "缺少必要参数"
-                }
-            end
-            
-            -- 更新todo状态
-            local success = task.update_todo_status(args.task_id, args.todo_id, args.status, args.result)
-            
-            if success then
-                -- 检查是否所有todo都已完成
-                if task.are_all_todos_complete(args.task_id) then
-                    task.update_task_status(args.task_id, task.TASK_STATUS.COMPLETED)
-                    return {
-                        success = true,
-                        message = "Todo状态更新成功，所有任务已完成",
-                        task_completed = true
-                    }
-                else
-                    return {
-                        success = true,
-                        message = "Todo状态更新成功",
-                        task_completed = false
-                    }
-                end
-            else
-                return {
-                    success = false,
-                    error = "Todo状态更新失败"
-                }
-            end
-        end
-    }
-    
-    -- finish_task 工具
-    M.builtin_tools.finish_task = {
-        name = "finish_task",
-        description = "标记任务完成并退出执行循环",
-        parameters = {
-            type = "object",
-            properties = {
-                task_id = {
-                    type = "string",
-                    description = "任务ID"
-                },
-                summary = {
-                    type = "string",
-                    description = "任务完成总结"
-                },
-                success = {
-                    type = "boolean",
-                    description = "任务是否成功完成"
-                }
-            },
-            required = {"task_id", "summary"}
-        },
-        execute = function(args)
-            utils.log("info", "执行 finish_task 工具")
-            
-            -- 验证参数
-            if not args.task_id or not args.summary then
-                return {
-                    success = false,
-                    error = "缺少必要参数"
-                }
-            end
-            
-            -- 更新任务状态
-            local final_status = (args.success == false) and task.TASK_STATUS.FAILED or task.TASK_STATUS.COMPLETED
-            local success = task.update_task_status(args.task_id, final_status)
-            
-            if success then
-                return {
-                    success = true,
-                    message = "任务已完成",
-                    summary = args.summary,
-                    task_completed = true
-                }
-            else
-                return {
-                    success = false,
-                    error = "任务完成标记失败"
-                }
-            end
-        end
-    }
-    
-    -- 注册内置工具
+    -- 注册内置工具到工具注册表
     for name, tool in pairs(M.builtin_tools) do
-        M.register_tool(tool)
+        M.tools[name] = tool
+        utils.log("debug", "注册内置工具: " .. name)
     end
     
     utils.log("info", "内置工具加载完成")
@@ -272,7 +92,7 @@ end
 
 -- 注销工具
 function M.unregister_tool(tool_name)
-    if M.builtin_tools[tool_name] then
+    if tools_module.is_builtin_tool(tool_name) then
         utils.log("warn", "不能注销内置工具: " .. tool_name)
         return false
     end
@@ -318,27 +138,34 @@ function M.execute_tool(tool_name, args)
     
     utils.log("info", "执行工具: " .. tool_name)
     
-    -- 验证参数
-    local valid, error_msg = M.validate_tool_args(tool, args)
-    if not valid then
-        utils.log("error", "工具参数验证失败: " .. error_msg)
-        return {
-            success = false,
-            error = "参数验证失败: " .. error_msg
-        }
+    -- 检查是否是新的工具对象（有safe_execute方法）
+    if tool.safe_execute and type(tool.safe_execute) == "function" then
+        -- 新的工具对象，使用safe_execute方法
+        return tool:safe_execute(args)
+    else
+        -- 兼容旧的工具格式
+        -- 验证参数
+        local valid, error_msg = M.validate_tool_args(tool, args)
+        if not valid then
+            utils.log("error", "工具参数验证失败: " .. error_msg)
+            return {
+                success = false,
+                error = "参数验证失败: " .. error_msg
+            }
+        end
+        
+        -- 执行工具
+        local success, result = utils.safe_call(tool.execute, args)
+        if not success then
+            utils.log("error", "工具执行失败: " .. tostring(result))
+            return {
+                success = false,
+                error = "工具执行失败: " .. tostring(result)
+            }
+        end
+        
+        return result
     end
-    
-    -- 执行工具
-    local success, result = utils.safe_call(tool.execute, args)
-    if not success then
-        utils.log("error", "工具执行失败: " .. tostring(result))
-        return {
-            success = false,
-            error = "工具执行失败: " .. tostring(result)
-        }
-    end
-    
-    return result
 end
 
 -- 验证工具参数
@@ -409,18 +236,27 @@ function M.validate_param_type(value, param_spec)
     return true
 end
 
--- 获取工具的函数调用格式
+-- 获取工具的函数调用格式 (OpenAI tools格式)
 function M.get_function_call_format(tool_name)
     local tool = M.tools[tool_name]
     if not tool then
         return nil
     end
     
-    return {
-        name = tool.name,
-        description = tool.description,
-        parameters = tool.parameters
-    }
+    -- 检查是否是新的工具对象（有to_openai_format方法）
+    if tool.to_openai_format and type(tool.to_openai_format) == "function" then
+        return tool:to_openai_format()
+    else
+        -- 兼容旧的工具格式
+        return {
+            type = "function",
+            ["function"] = {
+                name = tool.name,
+                description = tool.description,
+                parameters = tool.parameters
+            }
+        }
+    end
 end
 
 -- 获取所有工具的函数调用格式
@@ -454,7 +290,7 @@ function M.get_tool_categories()
     }
     
     for name, tool in pairs(M.tools) do
-        if M.builtin_tools[name] then
+        if tools_module.is_builtin_tool(name) then
             table.insert(categories.builtin, name)
         else
             table.insert(categories.custom, name)
@@ -511,7 +347,7 @@ function M.export_tool_data()
     
     -- 只导出自定义工具
     for name, tool in pairs(M.tools) do
-        if not M.builtin_tools[name] then
+        if not tools_module.is_builtin_tool(name) then
             export_data.tools[name] = tool
         end
     end
@@ -551,12 +387,40 @@ function M.get_tool_usage_stats()
         stats[name] = {
             name = name,
             description = tool.description,
-            is_builtin = M.builtin_tools[name] ~= nil,
+            is_builtin = tools_module.is_builtin_tool(name),
             -- 这里可以添加更多统计信息，比如调用次数等
         }
     end
     
     return stats
+end
+
+-- 获取内置工具模块
+function M.get_builtin_tools_module()
+    return tools_module
+end
+
+-- 重新加载内置工具（用于开发调试）
+function M.reload_builtin_tools()
+    -- 重新加载工具模块
+    package.loaded["doodle.tools"] = nil
+    tools_module = require("doodle.tools")
+    
+    -- 清除内置工具
+    for name in pairs(M.builtin_tools) do
+        M.tools[name] = nil
+    end
+    M.builtin_tools = {}
+    
+    -- 重新加载内置工具
+    M.load_builtin_tools()
+    
+    utils.log("info", "内置工具重新加载完成")
+end
+
+-- 验证所有内置工具
+function M.validate_all_builtin_tools()
+    return tools_module.validate_all_builtin_tools()
 end
 
 return M 

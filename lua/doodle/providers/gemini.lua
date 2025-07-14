@@ -1,24 +1,36 @@
 -- lua/doodle/providers/gemini.lua
 local utils = require("doodle.utils")
 local base = require("doodle.providers.base")
+require("doodle.types")
 
 local M = {}
 
 -- Gemini Provider类
+---@class DoodleGeminiProvider : DoodleBaseProvider
 M.GeminiProvider = {}
 M.GeminiProvider.__index = M.GeminiProvider
 setmetatable(M.GeminiProvider, { __index = base.BaseProvider })
 
+---@param config DoodleProviderConfig | DoodleCustomProviderConfig
+---@return DoodleGeminiProvider
 function M.GeminiProvider:new(config)
     config = config or {}
-    config.name = "gemini"
-    config.description = "Google Gemini API Provider"
-    config.base_url = config.base_url or "https://generativelanguage.googleapis.com/v1beta"
-    config.model = config.model or "gemini-pro"
-    config.stream = config.stream or true
-    config.supports_functions = config.supports_functions or true
     
-    local instance = base.BaseProvider:new(config)
+    -- Gemini provider专用的API key获取逻辑
+    local api_key = config.gemini_api_key or os.getenv("GEMINI_API_KEY") or ""
+    
+    -- 创建config的副本，避免修改原始对象
+    local provider_config = {
+        name = "gemini",
+        description = "Google Gemini API Provider",
+        base_url = config.base_url or "https://generativelanguage.googleapis.com/v1beta",
+        model = config.model or "gemini-pro",
+        api_key = api_key,
+        stream = config.stream or true,
+        supports_functions = config.supports_functions or true,
+    }
+    
+    local instance = base.BaseProvider:new(provider_config)
     setmetatable(instance, self)
     return instance
 end
@@ -27,39 +39,110 @@ end
 function M.GeminiProvider:handle_stream_request(curl, url, data, headers, callback)
     local response_buffer = ""
     
-    local function process_chunk(chunk)
-        response_buffer = response_buffer .. chunk
+    local function process_chunk(error, data)
+        utils.log("dev", "[Gemini] process_chunk调用开始")
         
-        -- 处理 Gemini 的流式响应格式
-        for line in response_buffer:gmatch("[^\r\n]+") do
+        -- 检查是否有错误
+        if error then
+            utils.log("error", "[Gemini] 流式输出错误: " .. error)
+            utils.log("dev", "[Gemini] 错误处理: 调用callback并返回")
+            callback(nil, { error = "流式输出错误: " .. error })
+            return
+        end
+        
+        -- 检查data是否为nil或空
+        if not data or data == "" then
+            utils.log("dev", "[Gemini] 数据为空，跳过处理")
+            return
+        end
+        
+        utils.log("dev", "[Gemini] 接收到原始数据长度: " .. #data)
+        utils.log("dev", "[Gemini] 接收到原始数据内容: " .. vim.inspect(data))
+        
+        -- 直接分割当前接收到的数据
+        local lines = vim.split(data, "\n")
+        utils.log("dev", "[Gemini] 数据分割为 " .. #lines .. " 行")
+        
+        -- 处理每一行
+        for i, line in ipairs(lines) do
+            utils.log("dev", "[Gemini] 处理第 " .. i .. " 行: " .. vim.inspect(line))
+            
             if line:match("^data: ") then
                 local json_data = line:sub(7) -- 移除"data: "前缀
+                utils.log("dev", "[Gemini] 检测到SSE数据行，JSON内容: " .. vim.inspect(json_data))
                 
                 -- 跳过空行和ping
                 if json_data == "" or json_data == "ping" then
+                    utils.log("dev", "[Gemini] 跳过空行或ping消息")
                     goto continue
                 end
                 
+                utils.log("dev", "[Gemini] 尝试解析JSON: " .. json_data)
                 local success, parsed = pcall(vim.json.decode, json_data)
-                if success and parsed.candidates then
-                    local candidate = parsed.candidates[1]
-                    if candidate and candidate.content and candidate.content.parts then
-                        local part = candidate.content.parts[1]
-                        if part and part.text then
-                            callback(part.text, { type = "content" })
+                if success then
+                    utils.log("dev", "[Gemini] JSON解析成功: " .. vim.inspect(parsed))
+                    
+                    if parsed.candidates then
+                        local candidate = parsed.candidates[1]
+                        utils.log("dev", "[Gemini] 提取candidate数据: " .. vim.inspect(candidate))
+                        
+                        if candidate and candidate.content and candidate.content.parts then
+                            utils.log("dev", "[Gemini] 处理 " .. #candidate.content.parts .. " 个parts")
+                            
+                            for j, part in ipairs(candidate.content.parts) do
+                                utils.log("dev", "[Gemini] 处理part " .. j .. ": " .. vim.inspect(part))
+                                
+                                -- 处理文本内容
+                                if part.text then
+                                    utils.log("dev", "[Gemini] 发现文本数据: " .. vim.inspect(part.text))
+                                    utils.log("dev", "[Gemini] 调用callback发送内容")
+                                    callback(part.text, { type = "content" })
+                                end
+                                
+                                -- 处理函数调用 (转换为OpenAI格式)
+                                if part.functionCall then
+                                    utils.log("dev", "[Gemini] 发现函数调用数据: " .. vim.inspect(part.functionCall))
+                                    local tool_call = {
+                                        id = utils.generate_uuid(),
+                                        type = "function",
+                                        ["function"] = {
+                                            name = part.functionCall.name,
+                                            arguments = vim.json.encode(part.functionCall.args or {})
+                                        }
+                                    }
+                                    utils.log("dev", "[Gemini] 调用callback发送工具调用")
+                                    callback(tool_call, { type = "function_call" })
+                                end
+                                
+                                if not part.text and not part.functionCall then
+                                    utils.log("dev", "[Gemini] part中没有文本或函数调用数据")
+                                end
+                            end
                         end
+                        
+                        -- 检查是否完成
+                        if candidate and candidate.finishReason then
+                            utils.log("dev", "[Gemini] 检测到完成原因: " .. candidate.finishReason)
+                            callback(nil, { done = true, finish_reason = candidate.finishReason })
+                        end
+                    else
+                        utils.log("dev", "[Gemini] JSON结构不符合预期，缺少candidates字段")
                     end
                     
-                    -- 检查是否完成
-                    if candidate and candidate.finishReason then
-                        callback(nil, { done = true, finish_reason = candidate.finishReason })
+                    if parsed.error then
+                        utils.log("error", "[Gemini] API返回错误: " .. (parsed.error.message or "Unknown error"))
+                        callback(nil, { error = parsed.error.message or "Unknown error" })
                     end
-                elseif success and parsed.error then
-                    callback(nil, { error = parsed.error.message or "Unknown error" })
+                else
+                    utils.log("error", "[Gemini] JSON解析失败: " .. vim.inspect(parsed))
                 end
+            else
+                utils.log("dev", "[Gemini] 跳过非SSE数据行: " .. vim.inspect(line))
             end
             ::continue::
         end
+        
+        utils.log("dev", "[Gemini] process_chunk处理完成")
     end
     
     curl.post(url, {
@@ -88,14 +171,28 @@ function M.GeminiProvider:handle_sync_request(curl, url, data, headers, callback
                 if success then
                     if parsed.candidates and parsed.candidates[1] then
                         local candidate = parsed.candidates[1]
-                        if candidate.content and candidate.content.parts and candidate.content.parts[1] then
-                            local part = candidate.content.parts[1]
-                            if part.text then
-                                callback(part.text, { 
-                                    type = "content", 
-                                    done = true, 
-                                    finish_reason = candidate.finishReason 
-                                })
+                        if candidate.content and candidate.content.parts then
+                            for _, part in ipairs(candidate.content.parts) do
+                                -- 处理文本内容
+                                if part.text then
+                                    callback(part.text, { 
+                                        type = "content", 
+                                        done = true, 
+                                        finish_reason = candidate.finishReason 
+                                    })
+                                end
+                                -- 处理函数调用 (转换为OpenAI格式)
+                                if part.functionCall then
+                                    local tool_call = {
+                                        id = utils.generate_uuid(),
+                                        type = "function",
+                                        ["function"] = {
+                                            name = part.functionCall.name,
+                                            arguments = vim.json.encode(part.functionCall.args or {})
+                                        }
+                                    }
+                                    callback(tool_call, { type = "function_call", done = true })
+                                end
                             end
                         end
                     end
@@ -142,6 +239,23 @@ function M.GeminiProvider:convert_messages_to_gemini(messages)
     return gemini_contents
 end
 
+-- 转换OpenAI tools格式到Gemini function_declarations格式
+function M.GeminiProvider:convert_tools_to_gemini(tools)
+    local function_declarations = {}
+    
+    for _, tool in ipairs(tools) do
+        if tool.type == "function" and tool["function"] then
+            table.insert(function_declarations, {
+                name = tool["function"].name,
+                description = tool["function"].description,
+                parameters = tool["function"].parameters
+            })
+        end
+    end
+    
+    return function_declarations
+end
+
 -- 构建请求URL
 function M.GeminiProvider:build_request_url(model, api_key, stream)
     local endpoint = stream and "streamGenerateContent" or "generateContent"
@@ -157,7 +271,7 @@ function M.GeminiProvider:request(messages, options, callback)
         return false
     end
     
-    local api_key = self.config.api_key or options.api_key or os.getenv("GEMINI_API_KEY")
+    local api_key = self:get_api_key() or options.api_key
     if not api_key then
         utils.log("error", "未设置Gemini API Key")
         return false
@@ -198,11 +312,48 @@ function M.GeminiProvider:request(messages, options, callback)
         }
     }
     
-    -- 添加函数调用支持 (如果 Gemini 支持)
-    if options.functions then
+    -- 添加工具调用支持 (转换OpenAI tools格式到Gemini格式)
+    if options.tools then
         request_data.tools = {
-            function_declarations = options.functions
+            function_declarations = self:convert_tools_to_gemini(options.tools)
         }
+        
+        -- 添加 tool_choice 支持 (转换为 Gemini tool_config)
+        if options.tool_choice and options.tool_choice ~= "auto" then
+            request_data.tool_config = {
+                function_calling_config = {}
+            }
+            
+            if options.tool_choice == "none" then
+                request_data.tool_config.function_calling_config.mode = "none"
+            elseif type(options.tool_choice) == "string" then
+                -- 如果是字符串，表示特定工具名称，使用 "any" 模式
+                request_data.tool_config.function_calling_config.mode = "any"
+                request_data.tool_config.function_calling_config.allowed_function_names = {options.tool_choice}
+            elseif type(options.tool_choice) == "table" then
+                -- 如果是表，可能是 OpenAI 格式，需要转换
+                if options.tool_choice.type == "function" and options.tool_choice["function"] then
+                    request_data.tool_config.function_calling_config.mode = "any"
+                    request_data.tool_config.function_calling_config.allowed_function_names = {options.tool_choice["function"].name}
+                elseif options.tool_choice.mode then
+                    -- 直接指定模式
+                    request_data.tool_config.function_calling_config.mode = options.tool_choice.mode
+                    if options.tool_choice.allowed_function_names then
+                        request_data.tool_config.function_calling_config.allowed_function_names = options.tool_choice.allowed_function_names
+                    end
+                end
+            else
+                -- 其他情况，强制使用函数
+                request_data.tool_config.function_calling_config.mode = "any"
+            end
+        end
+    end
+    
+    -- 合并extra_body参数
+    if self.extra_body and type(self.extra_body) == "table" then
+        for key, value in pairs(self.extra_body) do
+            request_data[key] = value
+        end
     end
     
     local headers = {
