@@ -1,5 +1,6 @@
 -- lua/doodle/context.lua
 local utils = require("doodle.utils")
+local prompt = require("doodle.prompt")
 local M = {}
 
 -- 消息类型枚举
@@ -35,23 +36,19 @@ function M.load(config)
 end
 
 -- 创建新的上下文
-function M.create_context(context_id, system_message)
-    local context = {
+function M.create_context()
+    local context_id = "context_" .. utils.generate_uuid()
+    local system_message = prompt.create_system_message()
+    
+    M.contexts[context_id] = {
         id = context_id,
-        messages = {},
+        messages = { system_message },
         created_at = utils.get_timestamp(),
         updated_at = utils.get_timestamp(),
         metadata = {}
     }
     
-    -- 添加系统消息
-    if system_message then
-        M.add_message(context_id, M.MESSAGE_TYPE.SYSTEM, system_message)
-    end
-    
-    M.contexts[context_id] = context
-    utils.log("info", "创建新上下文: " .. context_id)
-    
+    utils.log("dev", "新上下文已创建, ID: " .. context_id)
     return context_id
 end
 

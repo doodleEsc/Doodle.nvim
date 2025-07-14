@@ -1,6 +1,6 @@
 -- lua/doodle/provider.lua
 local utils = require("doodle.utils")
-local providers = require("doodle.providers")
+local providers = require("doodle.providers.init")
 
 local M = {}
 

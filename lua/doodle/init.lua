@@ -52,22 +52,16 @@ end
 function M.setup(opts)
     opts = opts or {}
     
-    -- 深层合并用户配置
-    M.config = deep_merge(M.config, opts)
-    
-    -- 初始化基础模块
-    require("doodle.utils").init(M.config)
-    
-    -- 加载并合并各种组件
-    require("doodle.provider").load(M.config)
-    require("doodle.tool").load(M.config)
-    require("doodle.prompt").load(M.config)
-    
-    -- 初始化其他模块
-    require("doodle.task").load(M.config)
-    require("doodle.context").load(M.config)
-    require("doodle.agent").init(M.config)
-    require("doodle.ui").init(M.config)
+    -- 合并用户配置和默认配置
+    local final_config = deep_merge(M.config, opts)
+
+    -- 加载和初始化其他模块
+    M.config = final_config
+    require("doodle.utils").init(final_config)
+    require("doodle.prompt").load(final_config)
+    require("doodle.context").load(final_config)
+    require("doodle.tool").load(final_config)
+    require("doodle.provider").load(final_config)
     
     if M.config.debug then
         print("Doodle.nvim 初始化完成")

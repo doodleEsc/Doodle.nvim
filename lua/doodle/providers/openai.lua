@@ -13,7 +13,7 @@ function M.OpenAIProvider:new(config)
     config = config or {}
     config.name = "openai"
     config.description = "OpenAI API Provider"
-    config.base_url = config.base_url or "https://api.openai.com/v1"
+    config.base_url = config.base_url or "https://openrouter.ai/api/v1"
     config.model = config.model or "gpt-3.5-turbo"
     config.stream = config.stream or true
     config.supports_functions = config.supports_functions or true
