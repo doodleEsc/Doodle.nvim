@@ -37,7 +37,8 @@ end
 
 -- Anthropic 流式请求处理
 function M.AnthropicProvider:handle_stream_request(curl, url, data, headers, callback)
-    local response_buffer = ""
+    local tool_calls_aggregator = {} -- 用于聚合工具调用分片
+    local response_content = ""      -- 聚合文本内容
     
     local function process_chunk(error, data)
         utils.log("dev", "[Anthropic] process_chunk调用开始")
@@ -73,6 +74,15 @@ function M.AnthropicProvider:handle_stream_request(curl, url, data, headers, cal
                 
                 if json_data == "[DONE]" then
                     utils.log("dev", "[Anthropic] 检测到[DONE]标记，结束流式输出")
+                    
+                    -- 处理聚合的工具调用 - 每个工具调用单独callback
+                    for _, tool_call in ipairs(tool_calls_aggregator) do
+                        if tool_call.name ~= "" and tool_call.arguments ~= "" then
+                            utils.log("dev", "[Anthropic] 发送完整工具调用: " .. vim.inspect(tool_call))
+                            callback(tool_call, { type = "function_call" })
+                        end
+                    end
+                    
                     callback(nil, { done = true })
                     return
                 end
@@ -84,30 +94,40 @@ function M.AnthropicProvider:handle_stream_request(curl, url, data, headers, cal
                     
                     -- 处理内容增量
                     if parsed.delta and parsed.delta.text then
-                        utils.log("dev", "[Anthropic] 发现文本数据: " .. vim.inspect(parsed.delta.text))
-                        utils.log("dev", "[Anthropic] 调用callback发送内容")
+                        utils.log("dev", "[Anthropic] 聚合文本数据: " .. vim.inspect(parsed.delta.text))
+                        response_content = response_content .. parsed.delta.text
+                        -- 实时输出内容用于用户体验
                         callback(parsed.delta.text, { type = "content" })
                     end
                     
-                    -- 处理工具使用
+                    -- 处理工具使用 - 聚合到aggregator中
                     if parsed.delta and parsed.delta.tool_use then
                         local tool_use = parsed.delta.tool_use
                         utils.log("dev", "[Anthropic] 发现工具使用数据: " .. vim.inspect(tool_use))
-                        local tool_call = {
-                            id = tool_use.id,
+                        
+                        -- Anthropic通常不分片工具调用，但我们还是实现聚合机制
+                        local index = #tool_calls_aggregator + 1
+                        tool_calls_aggregator[index] = {
+                            id = tool_use.id or utils.generate_uuid(),
                             type = "function",
-                            ["function"] = {
-                                name = tool_use.name,
-                                arguments = vim.json.encode(tool_use.input or {})
-                            }
+                            name = tool_use.name,
+                            arguments = vim.json.encode(tool_use.input or {})
                         }
-                        utils.log("dev", "[Anthropic] 调用callback发送工具调用")
-                        callback(tool_call, { type = "function_call" })
+                        utils.log("dev", "[Anthropic] 聚合工具调用到索引: " .. index)
                     end
                     
                     -- 处理完成
                     if parsed.stop_reason then
                         utils.log("dev", "[Anthropic] 检测到停止原因: " .. parsed.stop_reason)
+                        
+                        -- 处理聚合的工具调用 - 每个工具调用单独callback
+                        for _, tool_call in ipairs(tool_calls_aggregator) do
+                            if tool_call.name ~= "" and tool_call.arguments ~= "" then
+                                utils.log("dev", "[Anthropic] 发送完整工具调用: " .. vim.inspect(tool_call))
+                                callback(tool_call, { type = "function_call" })
+                            end
+                        end
+                        
                         callback(nil, { done = true, stop_reason = parsed.stop_reason })
                     end
                     
@@ -131,7 +151,8 @@ function M.AnthropicProvider:handle_stream_request(curl, url, data, headers, cal
         utils.log("dev", "[Anthropic] process_chunk处理完成")
     end
     
-    curl.post(url, {
+    -- plenary.nvim的curl模块是通过job模块实现的，并且目前只需要实现流式异步返回。
+    return curl.post(url, {
         headers = headers,
         body = vim.json.encode(data),
         stream = process_chunk,
@@ -140,65 +161,63 @@ function M.AnthropicProvider:handle_stream_request(curl, url, data, headers, cal
                 utils.log("error", "Anthropic API请求失败: " .. result.status)
                 callback(nil, { error = "API请求失败", status = result.status })
             end
-        end
+        end,
     })
-    
-    return true
 end
 
--- Anthropic 同步请求处理
-function M.AnthropicProvider:handle_sync_request(curl, url, data, headers, callback)
-    curl.post(url, {
-        headers = headers,
-        body = vim.json.encode(data),
-        callback = function(result)
-            if result.status == 200 then
-                local success, parsed = pcall(vim.json.decode, result.body)
-                if success then
-                    -- 处理内容
-                    if parsed.content then
-                        for _, content in ipairs(parsed.content) do
-                            if content.type == "text" then
-                                callback(content.text, { type = "content", done = true })
-                            elseif content.type == "tool_use" then
-                                local tool_call = {
-                                    id = content.id,
-                                    type = "function",
-                                    ["function"] = {
-                                        name = content.name,
-                                        arguments = vim.json.encode(content.input or {})
-                                    }
-                                }
-                                callback(tool_call, { type = "function_call", done = true })
-                            end
-                        end
-                    end
-                    
-                    -- 处理旧格式的completion（向后兼容）
-                    if parsed.completion then
-                        callback(parsed.completion, { type = "content", done = true })
-                    end
-                    
-                    if parsed.stop_reason then
-                        callback(nil, { done = true, stop_reason = parsed.stop_reason })
-                    end
-                    
-                    if parsed.error then
-                        callback(nil, { error = parsed.error.message or "Unknown error" })
-                    end
-                else
-                    utils.log("error", "Anthropic响应解析失败")
-                    callback(nil, { error = "解析响应失败" })
-                end
-            else
-                utils.log("error", "Anthropic API请求失败: " .. result.status)
-                callback(nil, { error = "API请求失败", status = result.status })
-            end
-        end
-    })
-    
-    return true
-end
+-- -- Anthropic 同步请求处理
+-- function M.AnthropicProvider:handle_sync_request(curl, url, data, headers, callback)
+--     curl.post(url, {
+--         headers = headers,
+--         body = vim.json.encode(data),
+--         callback = function(result)
+--             if result.status == 200 then
+--                 local success, parsed = pcall(vim.json.decode, result.body)
+--                 if success then
+--                     -- 处理内容
+--                     if parsed.content then
+--                         for _, content in ipairs(parsed.content) do
+--                             if content.type == "text" then
+--                                 callback(content.text, { type = "content", done = true })
+--                             elseif content.type == "tool_use" then
+--                                 local tool_call = {
+--                                     id = content.id,
+--                                     type = "function",
+--                                     ["function"] = {
+--                                         name = content.name,
+--                                         arguments = vim.json.encode(content.input or {})
+--                                     }
+--                                 }
+--                                 callback(tool_call, { type = "function_call", done = true })
+--                             end
+--                         end
+--                     end
+--                     
+--                     -- 处理旧格式的completion（向后兼容）
+--                     if parsed.completion then
+--                         callback(parsed.completion, { type = "content", done = true })
+--                     end
+--                     
+--                     if parsed.stop_reason then
+--                         callback(nil, { done = true, stop_reason = parsed.stop_reason })
+--                     end
+--                     
+--                     if parsed.error then
+--                         callback(nil, { error = parsed.error.message or "Unknown error" })
+--                     end
+--                 else
+--                     utils.log("error", "Anthropic响应解析失败")
+--                     callback(nil, { error = "解析响应失败" })
+--                 end
+--             else
+--                 utils.log("error", "Anthropic API请求失败: " .. result.status)
+--                 callback(nil, { error = "API请求失败", status = result.status })
+--             end
+--         end
+--     })
+--     
+--     return true
+-- end
 
 -- 转换消息格式为Anthropic格式
 function M.AnthropicProvider:convert_messages_to_anthropic(messages)
@@ -253,7 +272,9 @@ function M.AnthropicProvider:request(messages, options, callback)
     local request_data = {
         model = options.model or self.model,
         messages = anthropic_messages,
-        stream = options.stream or false,
+        -- stream = options.stream or false,
+        -- 目前只需要实现流式输出，所以设置为true
+        stream = true,
         max_tokens = options.max_tokens or 2048,
         temperature = options.temperature or 0.7
     }
@@ -299,12 +320,20 @@ function M.AnthropicProvider:request(messages, options, callback)
     }
     
     utils.log("debug", "发送Anthropic请求: " .. self.base_url .. "/messages")
+    utils.log("debug", "发送Anthropic请求数据: " .. vim.inspect(request_data))
+    utils.log("debug", "发送Anthropic Header: " .. vim.inspect(headers))
     
-    if request_data.stream then
-        return self:handle_stream_request(curl, self.base_url .. "/messages", request_data, headers, callback)
-    else
-        return self:handle_sync_request(curl, self.base_url .. "/messages", request_data, headers, callback)
-    end
+    -- 目前只需要实现流式输出，所以设置为true
+    -- return plenary.nvim job object
+    return self:handle_stream_request(curl, self.base_url .. "/messages", request_data, headers, callback)
+    
+    -- if request_data.stream then
+    --     -- return plenary.nvim job object
+    --     return self:handle_stream_request(curl, self.base_url .. "/messages", request_data, headers, callback)
+    -- else
+    --     -- return curl response
+    --     return self:handle_sync_request(curl, self.base_url .. "/messages", request_data, headers, callback)
+    -- end
 end
 
 -- 工厂方法

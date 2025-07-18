@@ -37,7 +37,8 @@ end
 
 -- Gemini 流式请求处理
 function M.GeminiProvider:handle_stream_request(curl, url, data, headers, callback)
-    local response_buffer = ""
+    local tool_calls_aggregator = {} -- 用于聚合工具调用分片
+    local response_content = ""      -- 聚合文本内容
     
     local function process_chunk(error, data)
         utils.log("dev", "[Gemini] process_chunk调用开始")
@@ -94,24 +95,25 @@ function M.GeminiProvider:handle_stream_request(curl, url, data, headers, callba
                                 
                                 -- 处理文本内容
                                 if part.text then
-                                    utils.log("dev", "[Gemini] 发现文本数据: " .. vim.inspect(part.text))
-                                    utils.log("dev", "[Gemini] 调用callback发送内容")
+                                    utils.log("dev", "[Gemini] 聚合文本数据: " .. vim.inspect(part.text))
+                                    response_content = response_content .. part.text
+                                    -- 实时输出内容用于用户体验
                                     callback(part.text, { type = "content" })
                                 end
                                 
-                                -- 处理函数调用 (转换为OpenAI格式)
+                                -- 处理函数调用 - 聚合到aggregator中
                                 if part.functionCall then
                                     utils.log("dev", "[Gemini] 发现函数调用数据: " .. vim.inspect(part.functionCall))
-                                    local tool_call = {
+                                    
+                                    -- Gemini通常不分片工具调用，但我们还是实现聚合机制
+                                    local index = #tool_calls_aggregator + 1
+                                    tool_calls_aggregator[index] = {
                                         id = utils.generate_uuid(),
                                         type = "function",
-                                        ["function"] = {
-                                            name = part.functionCall.name,
-                                            arguments = vim.json.encode(part.functionCall.args or {})
-                                        }
+                                        name = part.functionCall.name,
+                                        arguments = vim.json.encode(part.functionCall.args or {})
                                     }
-                                    utils.log("dev", "[Gemini] 调用callback发送工具调用")
-                                    callback(tool_call, { type = "function_call" })
+                                    utils.log("dev", "[Gemini] 聚合工具调用到索引: " .. index)
                                 end
                                 
                                 if not part.text and not part.functionCall then
@@ -123,6 +125,15 @@ function M.GeminiProvider:handle_stream_request(curl, url, data, headers, callba
                         -- 检查是否完成
                         if candidate and candidate.finishReason then
                             utils.log("dev", "[Gemini] 检测到完成原因: " .. candidate.finishReason)
+                            
+                            -- 处理聚合的工具调用 - 每个工具调用单独callback
+                            for _, tool_call in ipairs(tool_calls_aggregator) do
+                                if tool_call.name ~= "" and tool_call.arguments ~= "" then
+                                    utils.log("dev", "[Gemini] 发送完整工具调用: " .. vim.inspect(tool_call))
+                                    callback(tool_call, { type = "function_call" })
+                                end
+                            end
+                            
                             callback(nil, { done = true, finish_reason = candidate.finishReason })
                         end
                     else
@@ -145,7 +156,8 @@ function M.GeminiProvider:handle_stream_request(curl, url, data, headers, callba
         utils.log("dev", "[Gemini] process_chunk处理完成")
     end
     
-    curl.post(url, {
+    -- plenary.nvim的curl模块是通过job模块实现的，并且目前只需要实现流式异步返回。
+    return curl.post(url, {
         headers = headers,
         body = vim.json.encode(data),
         stream = process_chunk,
@@ -154,65 +166,63 @@ function M.GeminiProvider:handle_stream_request(curl, url, data, headers, callba
                 utils.log("error", "Gemini API请求失败: " .. result.status)
                 callback(nil, { error = "API请求失败", status = result.status })
             end
-        end
+        end,
     })
-    
-    return true
 end
 
--- Gemini 同步请求处理
-function M.GeminiProvider:handle_sync_request(curl, url, data, headers, callback)
-    curl.post(url, {
-        headers = headers,
-        body = vim.json.encode(data),
-        callback = function(result)
-            if result.status == 200 then
-                local success, parsed = pcall(vim.json.decode, result.body)
-                if success then
-                    if parsed.candidates and parsed.candidates[1] then
-                        local candidate = parsed.candidates[1]
-                        if candidate.content and candidate.content.parts then
-                            for _, part in ipairs(candidate.content.parts) do
-                                -- 处理文本内容
-                                if part.text then
-                                    callback(part.text, { 
-                                        type = "content", 
-                                        done = true, 
-                                        finish_reason = candidate.finishReason 
-                                    })
-                                end
-                                -- 处理函数调用 (转换为OpenAI格式)
-                                if part.functionCall then
-                                    local tool_call = {
-                                        id = utils.generate_uuid(),
-                                        type = "function",
-                                        ["function"] = {
-                                            name = part.functionCall.name,
-                                            arguments = vim.json.encode(part.functionCall.args or {})
-                                        }
-                                    }
-                                    callback(tool_call, { type = "function_call", done = true })
-                                end
-                            end
-                        end
-                    end
-                    
-                    if parsed.error then
-                        callback(nil, { error = parsed.error.message or "Unknown error" })
-                    end
-                else
-                    utils.log("error", "Gemini响应解析失败")
-                    callback(nil, { error = "解析响应失败" })
-                end
-            else
-                utils.log("error", "Gemini API请求失败: " .. result.status)
-                callback(nil, { error = "API请求失败", status = result.status })
-            end
-        end
-    })
-    
-    return true
-end
+-- -- Gemini 同步请求处理
+-- function M.GeminiProvider:handle_sync_request(curl, url, data, headers, callback)
+--     curl.post(url, {
+--         headers = headers,
+--         body = vim.json.encode(data),
+--         callback = function(result)
+--             if result.status == 200 then
+--                 local success, parsed = pcall(vim.json.decode, result.body)
+--                 if success then
+--                     if parsed.candidates and parsed.candidates[1] then
+--                         local candidate = parsed.candidates[1]
+--                         if candidate.content and candidate.content.parts then
+--                             for _, part in ipairs(candidate.content.parts) do
+--                                 -- 处理文本内容
+--                                 if part.text then
+--                                     callback(part.text, { 
+--                                         type = "content", 
+--                                         done = true, 
+--                                         finish_reason = candidate.finishReason 
+--                                     })
+--                                 end
+--                                 -- 处理函数调用 (转换为OpenAI格式)
+--                                 if part.functionCall then
+--                                     local tool_call = {
+--                                         id = utils.generate_uuid(),
+--                                         type = "function",
+--                                         ["function"] = {
+--                                             name = part.functionCall.name,
+--                                             arguments = vim.json.encode(part.functionCall.args or {})
+--                                         }
+--                                     }
+--                                     callback(tool_call, { type = "function_call", done = true })
+--                                 end
+--                             end
+--                         end
+--                     end
+--                     
+--                     if parsed.error then
+--                         callback(nil, { error = parsed.error.message or "Unknown error" })
+--                     end
+--                 else
+--                     utils.log("error", "Gemini响应解析失败")
+--                     callback(nil, { error = "解析响应失败" })
+--                 end
+--             else
+--                 utils.log("error", "Gemini API请求失败: " .. result.status)
+--                 callback(nil, { error = "API请求失败", status = result.status })
+--             end
+--         end
+--     })
+--     
+--     return true
+-- end
 
 -- 转换消息格式为Gemini格式
 function M.GeminiProvider:convert_messages_to_gemini(messages)
@@ -278,7 +288,9 @@ function M.GeminiProvider:request(messages, options, callback)
     end
     
     local model = options.model or self.model
-    local stream = options.stream or false
+    -- local stream = options.stream or false
+    -- 目前只需要实现流式输出，所以设置为true
+    local stream = true
     
     -- 转换消息格式
     local gemini_contents = self:convert_messages_to_gemini(messages)
@@ -363,12 +375,20 @@ function M.GeminiProvider:request(messages, options, callback)
     local url = self:build_request_url(model, api_key, stream)
     
     utils.log("debug", "发送Gemini请求: " .. url)
+    utils.log("debug", "发送Gemini请求数据: " .. vim.inspect(request_data))
+    utils.log("debug", "发送Gemini Header: " .. vim.inspect(headers))
     
-    if stream then
-        return self:handle_stream_request(curl, url, request_data, headers, callback)
-    else
-        return self:handle_sync_request(curl, url, request_data, headers, callback)
-    end
+    -- 目前只需要实现流式输出，所以设置为true
+    -- return plenary.nvim job object
+    return self:handle_stream_request(curl, url, request_data, headers, callback)
+    
+    -- if stream then
+    --     -- return plenary.nvim job object
+    --     return self:handle_stream_request(curl, url, request_data, headers, callback)
+    -- else
+    --     -- return curl response
+    --     return self:handle_sync_request(curl, url, request_data, headers, callback)
+    -- end
 end
 
 -- 工厂方法

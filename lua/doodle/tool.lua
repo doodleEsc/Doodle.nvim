@@ -125,47 +125,83 @@ function M.list_tools()
     return tool_list
 end
 
--- 执行工具
-function M.execute_tool(tool_name, args)
+-- 异步执行工具，返回 plenary job
+function M.execute_tool(tool_name, args, callback)
+    local plenary_ok, Job = pcall(require, "plenary.job")
+    if not plenary_ok then
+        utils.log("error", "plenary.nvim 未安装")
+        callback(nil, "plenary.nvim 未安装")
+        return nil
+    end
+    
     local tool = M.tools[tool_name]
     if not tool then
         utils.log("error", "工具不存在: " .. tool_name)
-        return {
-            success = false,
-            error = "工具不存在: " .. tool_name
-        }
+        callback(nil, "工具不存在: " .. tool_name)
+        return nil
     end
     
-    utils.log("info", "执行工具: " .. tool_name)
+    utils.log("dev", "异步执行工具: " .. tool_name)
     
-    -- 检查是否是新的工具对象（有safe_execute方法）
-    if tool.safe_execute and type(tool.safe_execute) == "function" then
-        -- 新的工具对象，使用safe_execute方法
-        return tool:safe_execute(args)
-    else
-        -- 兼容旧的工具格式
-        -- 验证参数
-        local valid, error_msg = M.validate_tool_args(tool, args)
-        if not valid then
-            utils.log("error", "工具参数验证失败: " .. error_msg)
-            return {
-                success = false,
-                error = "参数验证失败: " .. error_msg
-            }
+    -- 创建异步工具执行 job
+    local job = Job:new({
+        command = "lua",
+        args = {"-e", "return true"}, -- 占位命令
+        on_start = function()
+            utils.log("dev", "工具执行开始: " .. tool_name)
+        end,
+        on_exit = function(j, return_val)
+            utils.log("dev", "工具执行完成: " .. tool_name)
         end
+    })
+    
+    -- 覆盖 job 的 start 方法来执行我们的工具逻辑
+    local original_start = job.start
+    job.start = function(self)
+        -- 异步执行工具
+        vim.schedule(function()
+            local success, result = pcall(function()
+                -- 检查是否是新的工具对象（有safe_execute方法）
+                if tool.safe_execute and type(tool.safe_execute) == "function" then
+                    -- 新的工具对象，使用safe_execute方法
+                    return tool:safe_execute(args)
+                else
+                    -- 兼容旧的工具格式
+                    -- 验证参数
+                    local valid, error_msg = M.validate_tool_args(tool, args)
+                    if not valid then
+                        return {
+                            success = false,
+                            error = "参数验证失败: " .. error_msg
+                        }
+                    end
+                    
+                    -- 执行工具
+                    local exec_success, exec_result = utils.safe_call(tool.execute, args)
+                    if not exec_success then
+                        return {
+                            success = false,
+                            error = "工具执行失败: " .. tostring(exec_result)
+                        }
+                    end
+                    
+                    return exec_result
+                end
+            end)
+            
+            if success then
+                utils.log("dev", "工具执行成功: " .. tool_name)
+                callback(result, nil)
+            else
+                utils.log("error", "工具执行失败: " .. tool_name .. ", 错误: " .. tostring(result))
+                callback(nil, "工具执行失败: " .. tostring(result))
+            end
+        end)
         
-        -- 执行工具
-        local success, result = utils.safe_call(tool.execute, args)
-        if not success then
-            utils.log("error", "工具执行失败: " .. tostring(result))
-            return {
-                success = false,
-                error = "工具执行失败: " .. tostring(result)
-            }
-        end
-        
-        return result
+        return self
     end
+    
+    return job
 end
 
 -- 验证工具参数
